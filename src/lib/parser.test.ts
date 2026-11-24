@@ -67,11 +67,11 @@ const cases: Case[] = [
     bank: "SCB",
   },
   {
-    name: "SCB Easy PromptPay push (full)",
-    text: "คุณได้รับเงิน 10.00 บาท ผ่านรายการพร้อมเพย์จาก KBANK / xxxxxx5461 เข้าบัญชี xxx-xxx123-4",
+    name: "SCB Easy PromptPay push (full, real format with date)",
+    text: "คุณได้รับเงิน 1.00 บาท ผ่านรายการพร้อมเพย์จาก KBANK / xxxxxx0000 เข้าบัญชี xxxxxx9999 เมื่อ 24 พ.ย. 2569 - 14:14",
     source: "SCB Easy",
     direction: "in",
-    amountSatang: 1_000,
+    amountSatang: 100,
     bank: "SCB",
   },
   {
