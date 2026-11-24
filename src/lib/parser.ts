@@ -126,12 +126,22 @@ export function extractAmount(text: string): number | null {
   return null;
 }
 
-export function detectBank(text: string, source?: string | null): string | null {
-  const haystack = `${source ?? ""} ${text}`;
+function matchBank(haystack: string): string | null {
   for (const [bank, pattern] of BANK_PATTERNS) {
     if (pattern.test(haystack)) return bank;
   }
   return null;
+}
+
+/** Strips "จาก KBANK" / "from KBANK": the sender's bank, not the account that received the money. */
+const SENDER_BANK = /(?:จาก|from)\s*[^\s/]+/giu;
+
+/**
+ * Resolves the receiving bank. The notifying app (source) wins, since texts often name the
+ * sender's bank, e.g. SCB Easy: "คุณได้รับเงิน ... พร้อมเพย์จาก KBANK".
+ */
+export function detectBank(text: string, source?: string | null): string | null {
+  return (source ? matchBank(source) : null) ?? matchBank(text.replace(SENDER_BANK, " ")) ?? matchBank(text);
 }
 
 export function parseNotification(text: string, source?: string | null): ParsedNotification {
