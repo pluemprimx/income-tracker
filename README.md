@@ -1,24 +1,32 @@
 # Income Tracker
 
-Receives bank notification text (SMS / push) via webhook, parses incoming transfers, stores them in SQLite, and shows totals and counts (today / this month / all time, Asia/Bangkok time).
+Receives bank notification text (SMS / push) via webhook, parses incoming transfers, stores them in Postgres, and shows totals and counts (today / this month / all time, Asia/Bangkok time).
 
 ## Stack
 
-Next.js 16 (App Router) · TypeScript · `node:sqlite` (built into Node ≥ 22.13, no native deps)
+Next.js 16 (App Router) · TypeScript · Neon Postgres (`@neondatabase/serverless`) · Vercel
 
 ## Setup
 
 ```bash
 npm install
-cp .env.example .env.local   # then set WEBHOOK_SECRET (e.g. `openssl rand -hex 32`)
+cp .env.example .env.local   # set DATABASE_URL and WEBHOOK_SECRET (`openssl rand -hex 32`)
+npm run db:migrate           # create tables (idempotent)
 npm run dev                  # http://localhost:3010
 ```
 
 | Env | Required | Description |
 | --- | --- | --- |
+| `DATABASE_URL` | yes | Neon Postgres connection string |
 | `WEBHOOK_SECRET` | yes | Shared secret for `/api/*` |
 | `DASHBOARD_PASSWORD` | no | Enables HTTP Basic Auth on the dashboard (user `admin`) |
-| `DATABASE_PATH` | no | SQLite file, default `./data/income.db` |
+
+## Deploy (Vercel + Neon)
+
+1. Import the GitHub repo at vercel.com/new.
+2. Project → Storage → add **Neon** (sets `DATABASE_URL` automatically).
+3. Project → Settings → Environment Variables: add `WEBHOOK_SECRET` and `DASHBOARD_PASSWORD`.
+4. Redeploy. The `vercel-build` script runs `db:migrate` before `next build`, so tables are created on every deploy.
 
 ## Webhook
 
@@ -49,7 +57,7 @@ The same text received again within 10 minutes is treated as a duplicate and not
 - **Android** — MacroDroid / Tasker: trigger on *Notification received* (bank app) or *SMS received*, action *HTTP Request* POST to the webhook with the notification text as `text`.
 - **iOS** — Shortcuts → Automation → *Message* (from the bank's SMS sender) → *Get Contents of URL* (POST, JSON, header `Authorization`). iOS cannot read push notifications of other apps, so use bank SMS alerts.
 
-The phone needs to reach the server: deploy it (VPS, Railway, Fly.io — anything with a persistent disk for SQLite) or expose it locally with a tunnel such as Cloudflare Tunnel / ngrok.
+Point the automation at `https://<your-app>.vercel.app/api/webhook`.
 
 ## Tests
 
