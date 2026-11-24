@@ -16,7 +16,7 @@ export async function addNotificationAction(_prev: ActionState, formData: FormDa
   });
   if (!validation.ok) return { message: validation.error, error: true };
 
-  const result = recordNotification(validation.value);
+  const result = await recordNotification(validation.value);
   revalidatePath("/");
   if (result.duplicate) return { message: `ข้อความซ้ำกับรายการ #${result.existingId}`, error: true };
 
@@ -31,6 +31,6 @@ export async function addNotificationAction(_prev: ActionState, formData: FormDa
 export async function deleteNotificationAction(formData: FormData): Promise<void> {
   const id = Number(formData.get("id"));
   if (!Number.isSafeInteger(id) || id <= 0) return;
-  deleteNotification(id);
+  await deleteNotification(id);
   revalidatePath("/");
 }

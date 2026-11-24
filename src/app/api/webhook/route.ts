@@ -34,7 +34,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = recordNotification(validation.value);
+    const result = await recordNotification(validation.value);
     if (result.duplicate) {
       return NextResponse.json({ duplicate: true, id: result.existingId }, { status: 200 });
     }

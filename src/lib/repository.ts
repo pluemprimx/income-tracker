@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { getDb } from "./db";
+import { getSql } from "./db";
 import { parseNotification, type Direction } from "./parser";
 
 export type NotificationStatus = "income" | "ignored" | "unparsed";
@@ -38,31 +38,34 @@ export interface IncomeStats {
 }
 
 /** Same text arriving again within this window is treated as a duplicate forward. */
-const DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
-const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000; // Asia/Bangkok has no DST.
-const DAY_MS = 24 * 60 * 60 * 1000;
+const DUPLICATE_WINDOW_SECONDS = 10 * 60;
+const TIME_ZONE = "Asia/Bangkok";
 
+/** Postgres BIGINT / NUMERIC arrive as strings; timestamps are selected as epoch ms. */
 interface NotificationRow {
-  id: number;
+  id: string | number;
   raw_text: string;
   source: string | null;
   bank: string | null;
   direction: Direction;
-  amount_satang: number | null;
+  amount_satang: string | number | null;
   status: NotificationStatus;
-  received_at: number;
+  received_at_ms: string | number;
 }
+
+const RECORD_COLUMNS = `id, raw_text, source, bank, direction, amount_satang, status,
+  (extract(epoch FROM received_at) * 1000)::float8 AS received_at_ms`;
 
 function toRecord(row: NotificationRow): NotificationRecord {
   return {
-    id: row.id,
+    id: Number(row.id),
     rawText: row.raw_text,
     source: row.source,
     bank: row.bank,
     direction: row.direction,
-    amountSatang: row.amount_satang,
+    amountSatang: row.amount_satang === null ? null : Number(row.amount_satang),
     status: row.status,
-    receivedAt: row.received_at,
+    receivedAt: Math.round(Number(row.received_at_ms)),
   };
 }
 
@@ -76,81 +79,88 @@ function resolveStatus(direction: Direction, amountSatang: number | null): Notif
   return "unparsed";
 }
 
-export function recordNotification(input: RecordInput): RecordResult {
-  const db = getDb();
-  const now = Date.now();
-  const receivedAt = input.receivedAt ?? now;
+export async function recordNotification(input: RecordInput): Promise<RecordResult> {
+  const sql = getSql();
+  const receivedAt = new Date(input.receivedAt ?? Date.now()).toISOString();
   const textHash = hashText(input.text);
 
-  const existing = db
-    .prepare("SELECT id FROM notifications WHERE text_hash = ? AND ABS(received_at - ?) < ? LIMIT 1")
-    .get(textHash, receivedAt, DUPLICATE_WINDOW_MS) as { id: number } | undefined;
-  if (existing) return { duplicate: true, existingId: existing.id };
+  const existing = (await sql.query(
+    `SELECT id FROM notifications
+     WHERE text_hash = $1 AND abs(extract(epoch FROM (received_at - $2::timestamptz))) < $3
+     LIMIT 1`,
+    [textHash, receivedAt, DUPLICATE_WINDOW_SECONDS],
+  )) as Array<{ id: string | number }>;
+  if (existing[0]) return { duplicate: true, existingId: Number(existing[0].id) };
 
   const parsed = parseNotification(input.text, input.source);
   const status = resolveStatus(parsed.direction, parsed.amountSatang);
 
-  const row = db
-    .prepare(
-      `INSERT INTO notifications
-         (raw_text, text_hash, source, bank, direction, amount_satang, status, received_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       RETURNING id, raw_text, source, bank, direction, amount_satang, status, received_at`,
-    )
-    .get(
-      input.text,
-      textHash,
-      input.source ?? null,
-      parsed.bank,
-      parsed.direction,
-      parsed.amountSatang,
-      status,
-      receivedAt,
-      now,
-    ) as unknown as NotificationRow;
+  const rows = (await sql.query(
+    `INSERT INTO notifications
+       (raw_text, text_hash, source, bank, direction, amount_satang, status, received_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz)
+     RETURNING ${RECORD_COLUMNS}`,
+    [input.text, textHash, input.source ?? null, parsed.bank, parsed.direction, parsed.amountSatang, status, receivedAt],
+  )) as NotificationRow[];
+  const row = rows[0];
+  if (!row) throw new Error("Insert returned no row");
 
   return { duplicate: false, record: toRecord(row) };
 }
 
-function sumIncomeSince(since: number): IncomeSummary {
-  const row = getDb()
-    .prepare(
-      `SELECT COUNT(*) AS count, COALESCE(SUM(amount_satang), 0) AS total
-       FROM notifications WHERE status = 'income' AND received_at >= ?`,
-    )
-    .get(since) as { count: number; total: number };
-  return { count: row.count, totalSatang: row.total };
+interface StatsRow {
+  today_count: string | number;
+  today_total: string | number;
+  month_count: string | number;
+  month_total: string | number;
+  all_count: string | number;
+  all_total: string | number;
 }
 
-function startOfBangkokDay(now: number): number {
-  return Math.floor((now + BANGKOK_OFFSET_MS) / DAY_MS) * DAY_MS - BANGKOK_OFFSET_MS;
-}
-
-function startOfBangkokMonth(now: number): number {
-  const local = new Date(now + BANGKOK_OFFSET_MS);
-  return Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), 1) - BANGKOK_OFFSET_MS;
-}
-
-export function getIncomeStats(now: number = Date.now()): IncomeStats {
+export async function getIncomeStats(): Promise<IncomeStats> {
+  const rows = (await getSql().query(
+    `WITH bounds AS (
+       SELECT date_trunc('day',   now() AT TIME ZONE $1) AT TIME ZONE $1 AS day_start,
+              date_trunc('month', now() AT TIME ZONE $1) AT TIME ZONE $1 AS month_start
+     )
+     SELECT
+       count(*) FILTER (WHERE received_at >= day_start)                           AS today_count,
+       coalesce(sum(amount_satang) FILTER (WHERE received_at >= day_start), 0)    AS today_total,
+       count(*) FILTER (WHERE received_at >= month_start)                         AS month_count,
+       coalesce(sum(amount_satang) FILTER (WHERE received_at >= month_start), 0)  AS month_total,
+       count(*)                                                                    AS all_count,
+       coalesce(sum(amount_satang), 0)                                             AS all_total
+     FROM notifications, bounds
+     WHERE status = 'income'`,
+    [TIME_ZONE],
+  )) as StatsRow[];
+  const row = rows[0];
+  const summary = (count: string | number | undefined, total: string | number | undefined): IncomeSummary => ({
+    count: Number(count ?? 0),
+    totalSatang: Number(total ?? 0),
+  });
   return {
-    today: sumIncomeSince(startOfBangkokDay(now)),
-    month: sumIncomeSince(startOfBangkokMonth(now)),
-    allTime: sumIncomeSince(0),
+    today: summary(row?.today_count, row?.today_total),
+    month: summary(row?.month_count, row?.month_total),
+    allTime: summary(row?.all_count, row?.all_total),
   };
 }
 
-export function listNotifications(limit = 50, status?: NotificationStatus): NotificationRecord[] {
+export async function listNotifications(limit = 50, status?: NotificationStatus): Promise<NotificationRecord[]> {
   const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 500);
-  const db = getDb();
-  const rows = status
-    ? db
-        .prepare("SELECT * FROM notifications WHERE status = ? ORDER BY received_at DESC LIMIT ?")
-        .all(status, safeLimit)
-    : db.prepare("SELECT * FROM notifications ORDER BY received_at DESC LIMIT ?").all(safeLimit);
-  return (rows as unknown as NotificationRow[]).map(toRecord);
+  const sql = getSql();
+  const rows = (status
+    ? await sql.query(
+        `SELECT ${RECORD_COLUMNS} FROM notifications WHERE status = $1 ORDER BY received_at DESC LIMIT $2`,
+        [status, safeLimit],
+      )
+    : await sql.query(`SELECT ${RECORD_COLUMNS} FROM notifications ORDER BY received_at DESC LIMIT $1`, [
+        safeLimit,
+      ])) as NotificationRow[];
+  return rows.map(toRecord);
 }
 
-export function deleteNotification(id: number): boolean {
-  const result = getDb().prepare("DELETE FROM notifications WHERE id = ?").run(id);
-  return Number(result.changes) > 0;
+export async function deleteNotification(id: number): Promise<boolean> {
+  const rows = (await getSql().query("DELETE FROM notifications WHERE id = $1 RETURNING id", [id])) as unknown[];
+  return rows.length > 0;
 }

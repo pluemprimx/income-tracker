@@ -21,9 +21,8 @@ function StatCard({ label, count, totalSatang }: { label: string; count: number;
   );
 }
 
-export default function DashboardPage() {
-  const stats = getIncomeStats();
-  const notifications = listNotifications(100);
+export default async function DashboardPage() {
+  const [stats, notifications] = await Promise.all([getIncomeStats(), listNotifications(100)]);
 
   return (
     <main>
